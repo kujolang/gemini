@@ -18,8 +18,22 @@ export GEMINI_API_KEY=your-key
 
 ```kujo
 from gemini import create_client, client_generate_content
+
 client := create_client({})
-result := client_generate_content(client, "gemini-2.5-flash", [{"role":"user","parts":[{"text":"Hello from Kujo!"}]}], {})
+messages := [
+    {
+        "role": "user",
+        "parts": [{"text": "Hello from Kujo!"}]
+    }
+]
+
+result := client_generate_content(
+    client,
+    "gemini-2.5-flash",
+    messages,
+    {}
+)
+
 print(result["data"]["candidates"][0]["content"]["parts"][0]["text"])
 ```
 
