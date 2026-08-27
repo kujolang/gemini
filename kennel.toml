@@ -1,6 +1,6 @@
 [package]
 name = "gemini"
-version = "0.1.0"
+version = "0.1.3"
 description = "Native Google Gemini API client for Kujo with an AI SDK provider driver."
 license = "MIT"
 repository = "https://github.com/kujolang/gemini"
@@ -15,7 +15,7 @@ public_api = true
 minimum_version = "1.0.2"
 entry = "gemini.kujo"
 sources = ["src", "."]
-includes = ["README.md", "CHANGELOG.md", "examples", "tests", "AGENTS.md", "GEMINI_IMPLEMENTATION_REPORT.md", "GEMINI_PROVIDER_PACKAGE_CONFORMANCE.md"]
+includes = ["docs", "README.md", "CHANGELOG.md", "examples", "tests", "AGENTS.md", "docs/GEMINI_IMPLEMENTATION_REPORT.md", "docs/GEMINI_PROVIDER_PACKAGE_CONFORMANCE.md"]
 excludes = [".git", "dist", "build", "kennel_packages"]
 
 [dependencies]

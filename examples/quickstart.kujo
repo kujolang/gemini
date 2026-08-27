@@ -1,0 +1,3 @@
+from gemini import create_client, client_generate_content
+client := create_client({})
+print(client_generate_content(client, "gemini-2.5-flash", [{"role":"user","parts":[{"text":"Hello from Kujo!"}]}], {}))
