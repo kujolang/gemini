@@ -70,7 +70,7 @@ Secret redaction, HTTPS enforcement, URL credential rejection, protected API-key
 
 ## Clean-Room Install / Installed Consumer Smoke
 
-PENDING until tag and distribution validation.
+Blocked under the available local Kujo v1.0.0: Kennel add/install/reinstall/validate passed, but the installed consumer could not import the package root without `KUJO_MODULE_PATH`. The required remote Kujo v1.0.2 tag was verified; validation must be rerun with that runtime before this package can be marked release-ready.
 
 ## Live Validation
 
