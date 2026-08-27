@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+set -euo pipefail
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+KUJO_BIN="${KUJO_BIN:-$(command -v kujo)}"
+KENNEL_SCRIPT="${KENNEL_SCRIPT:-$ROOT/../kennel/kennel.kujo}"
+REF="${GEMINI_REF:-v0.1.1}"
+CLEAN="$(mktemp -d "${TMPDIR:-/tmp}/kujo-gemini-installed.XXXXXX")"
+trap 'rm -rf "$CLEAN"' EXIT
+cd "$CLEAN"
+"$KUJO_BIN" run "$KENNEL_SCRIPT" --interpreter -- init --name gemini-installed --project-dir "$CLEAN"
+"$KUJO_BIN" run "$KENNEL_SCRIPT" --interpreter -- add github:kujolang/gemini@"$REF" --alias gemini --project-dir "$CLEAN"
+"$KUJO_BIN" run "$KENNEL_SCRIPT" --interpreter -- install --project-dir "$CLEAN"
+"$KUJO_BIN" run "$KENNEL_SCRIPT" --interpreter -- install --project-dir "$CLEAN"
+"$KUJO_BIN" run "$KENNEL_SCRIPT" --interpreter -- validate --project-dir "$CLEAN"
+(cd "$CLEAN" && env -u KUJO_MODULE_PATH "$KUJO_BIN" test-run "$CLEAN/kennel_packages/gemini/tests/installed_consumer_smoke.kujo")
+echo "Installed-package Kennel smoke: PASS"

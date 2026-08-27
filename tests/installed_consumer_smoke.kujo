@@ -1,0 +1,2 @@
+test_setup { from gemini import create_client, client_generate_content, gemini_provider }
+test "installed root exports and provider factory resolve" { c:=create_client({"api_key":"fixture","transport":func(url,o) { return Ok({"_status":200,"_body":"{\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"installed\"}]}}]}"}) }}); r:=client_generate_content(c,"gemini-test",[],{}); assert_true(r["ok"]); assert_equal(type(gemini_provider({})),"dict") }
