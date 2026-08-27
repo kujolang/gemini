@@ -1,0 +1,2 @@
+func fake(url, options) { return Ok({"_status":200,"_headers":{"x-request-id":"req_gemini"},"_body":"{\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"Hello\"}]},\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"promptTokenCount\":2,\"candidatesTokenCount\":3}}"}) }
+export fake:=fake
