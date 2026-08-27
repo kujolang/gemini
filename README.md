@@ -9,7 +9,10 @@ Native Google Gemini Developer API support for Kujo, with normalized AI SDK inte
 ## Install
 
 ```bash
-kujo run /path/to/kennel/kennel.kujo --interpreter -- add github:kujolang/gemini@v0.1.3 --alias gemini
+kujo run /path/to/kennel/kennel.kujo \
+  --interpreter \
+  -- add github:kujolang/gemini@v0.1.3 \
+  --alias gemini
 kujo run /path/to/kennel/kennel.kujo --interpreter -- install
 export GEMINI_API_KEY=your-key
 ```
