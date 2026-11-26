@@ -19,7 +19,7 @@ includes = ["docs", "README.md", "CHANGELOG.md", "examples", "tests", "AGENTS.md
 excludes = [".git", "dist", "build", "kennel_packages"]
 
 [dependencies]
-ai-sdk = { source = "github:kujolang/ai-sdk", ref = "f3126dded28102f40d0ddecd50a559105c66f905" }
+ai-sdk = { source = "github:kujolang/ai-sdk", commit = "f3126dded28102f40d0ddecd50a559105c66f905" }
 
 [scripts]
 test = "bash scripts/release_quality_gate.sh"
