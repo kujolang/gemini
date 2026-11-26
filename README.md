@@ -12,7 +12,7 @@ The current branch requires Kujo 1.6.0 or newer.
 
 ```bash
 kujo run /path/to/kennel/kennel.kujo \
-  -- add github:kujolang/gemini@24d3c4e0e5c681e9c3b462867cd9966991d3fcee \
+  -- add github:kujolang/gemini@e361f443f89b48f6ce733e4786cbdbebabb09aba \
   --alias gemini
 kujo run /path/to/kennel/kennel.kujo -- install
 export GEMINI_API_KEY=your-key
