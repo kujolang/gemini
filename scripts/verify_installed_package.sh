@@ -3,7 +3,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 KUJO_BIN="${KUJO_BIN:-$(command -v kujo)}"
 KENNEL_SCRIPT="${KENNEL_SCRIPT:-$ROOT/../kennel/kennel.kujo}"
-REF="${GEMINI_REF:-v0.1.1}"
+REF="${GEMINI_REF:-v0.1.3}"
 CLEAN="$(mktemp -d "${TMPDIR:-/tmp}/kujo-gemini-installed.XXXXXX")"
 trap 'rm -rf "$CLEAN"' EXIT
 cd "$CLEAN"

@@ -1,37 +1,218 @@
-# Native Google Gemini Developer API client. Transport is injected for tests.
-func get(o,k,f) { if type(o)=="dict" && has_key(o,k) { return o[k] }; return f }
-func trim_slash(v) { r:=trim(v); while ends_with(r,"/") { r:=substring(r,0,len(r)-1) }; return r }
-func host_of(v) { p:=split(v,"/"); if len(p)>=3 { return lower(p[2]) }; return "" }
-func redact(v,s) { if type(v)=="string" && type(s)=="string" && s!="" { return replace(v,s,"[REDACTED]") }; return v }
-func valid_host(v) { if type(v)!="string" || trim(v)=="" { return {"ok":false,"error":"Gemini base URL must be a non-empty URL."} }; r:=trim_slash(v); p:=split(r,"/"); if len(p)<3 || trim(p[2])=="" || contains(r,"@") || contains(r,"?") || contains(r,"#") || contains(r,"\r") || contains(r,"\n") { return {"ok":false,"error":"Gemini base URL is unsafe."} }; if starts_with(lower(r),"https://") { return {"ok":true} }; return {"ok":false,"error":"Gemini remote endpoints must use HTTPS."} }
-func create_client_impl(config) { if type(config)!="dict" { config:={} }; base:=trim_slash(get(config,"base_url","https://generativelanguage.googleapis.com/v1beta")); check:=valid_host(base); key:=get(config,"api_key",null); if type(key)=="null" { key:=env("GEMINI_API_KEY"); if key=="" { key:=env("GOOGLE_API_KEY") } }; if type(key)!="string" { key:="" }; return {"base_url":base,"api_key":key,"timeout":get(config,"timeout",60.0),"transport":get(config,"transport",null),"validation_error":get(check,"error","")} }
-func transport_for(c) { if type(get(c,"transport",null))=="function" { return c["transport"] }; return http_request }
-func call(c,method,path,payload) {
-	if c["validation_error"]!="" { return {"ok":false,"message":c["validation_error"]} }
-	if c["api_key"]=="" { return {"ok":false,"message":"Gemini API key is required."} }
-	opts:={"method":method,"timeout":c["timeout"],"_headers":{"Content-Type":"application/json","x-goog-api-key":c["api_key"]}}
-	if type(payload)=="dict" { opts["_body"]:=to_json(payload) }
-	transport:=transport_for(c); result:=transport(c["base_url"]+path,opts)
-	match result {
-		case Err(e): { return {"ok":false,"message":redact(to_string(e),c["api_key"])} }
-		case Ok(resp): {
-			status:=get(resp,"_status",get(resp,"status",0)); body:=get(resp,"_body",get(resp,"body","")); parsed:=null
-			try { parsed:=parse_json(body) } except e { parsed:=null }
-			if status<200 || status>299 { return {"ok":false,"status_code":status,"message":redact(to_string(get(get(parsed,"error",{}),"message","Gemini request failed")),c["api_key"]),"error_body":redact(body,c["api_key"])} }
-			if type(parsed)=="null" { return {"ok":false,"status_code":status,"message":"Malformed Gemini JSON response."} }
-			return {"ok":true,"status_code":status,"data":parsed,"request_id":get(get(resp,"_headers",{}),"x-request-id","")}
-		}
-	}
+CHAT_BASE := "https://generativelanguage.googleapis.com/v1beta"
+
+func get(value, key, fallback) {
+    if type(value) == "dict" && has_key(value, key) { return value[key] }
+    return fallback
 }
-func chat_with_client(c,model,contents,config) { body:={"contents":contents}; if type(config)=="dict" { for k in ["systemInstruction","generationConfig","safetySettings","tools","toolConfig"] { if has_key(config,k) { body[k]:=config[k] } } }; return call(c,"POST","/models/"+model+":generateContent",body) }
-func stream_with_client(c,model,contents,config) { body:={"contents":contents}; if type(config)=="dict" { for k in ["systemInstruction","generationConfig","safetySettings","tools","toolConfig"] { if has_key(config,k) { body[k]:=config[k] } } }; body["stream"]:=true; return call(c,"POST","/models/"+model+":streamGenerateContent?alt=sse",body) }
-func client() { return create_client_impl({}) }
-export create_client:=create_client_impl
-export generate_content:=func(model,contents,config) { return chat_with_client(client(),model,contents,config) }
-export stream_generate_content:=func(model,contents,config) { return stream_with_client(client(),model,contents,config) }
-export client_generate_content:=chat_with_client
-export client_stream_generate_content:=stream_with_client
-export list_models:=func() { return call(client(),"GET","/models",{}) }
-export count_tokens:=func(model,contents) { return call(client(),"POST","/models/"+model+":countTokens",{"contents":contents}) }
-export embed_content:=func(model,content) { return call(client(),"POST","/models/"+model+":embedContent",{"content":content}) }
-export parse_stream:=func(chunks,body) { combined:=""; if type(chunks)=="array" { for c in chunks { combined:=combined+c } } else { combined:=body }; events:=[]; for block in split(combined,"\n\n") { for line in split(block,"\n") { if starts_with(line,"data:") { raw:=trim(substring(line,5,len(line))); if raw!="" { parsed:=null; try { parsed:=parse_json(raw) } except e { return {"ok":false,"events":[]} }; events=push(events,parsed) } } } }; return {"ok":true,"events":events} }
+
+func endpoint(value) {
+    if type(value) != "string" { return "" }
+    url := trim(value)
+    if regex_match(url, "[\\x00-\\x20\\x7f@?#\\\\]") { return "" }
+    if !regex_match(lower(url), "^https://(?:[a-z0-9][a-z0-9.-]*|\\[[0-9a-f:.]+\\])(?::[0-9]{1,5})?(?:/[a-z0-9._~/-]*)?$") { return "" }
+    for part in split(url,"/") {
+        if part == "." || part == ".." { return "" }
+    }
+    return regex_replace(url, "/+$", "")
+}
+
+func redact(text, key) {
+    if type(text) == "string" && key != "" { return replace(text, key, "[REDACTED]") }
+    return text
+}
+
+func redact_value(value, key) {
+    if key == "" { return value }
+    if type(value) == "string" { return redact(value,key) }
+    if type(value) != "dict" && type(value) != "array" { return value }
+    encoded := to_json(value)
+    key_literal := to_json(key)
+    if contains(encoded,substring(key_literal,1,len(key_literal)-1)) == 0 { return value }
+    // Inspect JSON text tokens so numbers and nested structure keep their types.
+    pattern := "\"(?:[^\"\\\\]|\\\\.)*\""
+    literals := regex_split(encoded,pattern)
+    index := 0
+    output := []
+    for token in regex_find_all(encoded,pattern) {
+        output = push(output,literals[index])
+        output = push(output,to_json(redact(parse_json(token),key)))
+        index = index + 1
+    }
+    return parse_json(join(push(output,literals[index]),""))
+}
+
+func redact_wire(text, key) {
+    if type(text) != "string" { return text }
+    if contains(text,key) == 0 && contains(text,"\\") == 0 { return text }
+    // Parse JSON strings before redaction so escaped credential values cannot
+    // surface when a consumer decodes the raw response.
+    try {
+        data := parse_json(text)
+        safe_data := redact_value(data,key)
+        if safe_data != data { return to_json(safe_data) }
+    } except error { }
+    encoded_key := to_json(key)
+    escaped_key := substring(encoded_key,1,len(encoded_key)-1)
+    return redact(redact(text,escaped_key),key)
+}
+
+func parse_stream_impl(chunks, body) {
+    failed := {"ok":false,"events":[]}
+    combined := body
+    if type(chunks) == "array" && len(chunks) > 0 {
+        for chunk in chunks { if type(chunk) != "string" { return failed } }
+        combined = join(chunks,"")
+    }
+    if type(combined) != "string" { return failed }
+    if contains(combined,"\r") > 0 { combined = replace(replace(combined,"\r\n","\n"),"\r","\n") }
+    blocks := split(combined,"\n\n")
+    events := range(0,len(blocks))
+    count := 0
+    for block in blocks {
+        data := ""
+        if starts_with(block,"data:") && contains(block,"\n") == 0 {
+            data = trim(substring(block,5,len(block)))
+        } else {
+            lines := []
+            for line in split(block,"\n") {
+                if starts_with(line,"data:") { lines = push(lines,substring(line,5,len(line))) }
+            }
+            data = trim(join(lines,"\n"))
+        }
+        if data == "" { continue }
+        if data == "[DONE]" { break }
+        parsed := null
+        try { parsed = parse_json(data) } except error { return failed }
+        if type(parsed) != "dict" { return failed }
+        events[count] = parsed
+        count = count + 1
+    }
+    return {"ok":true,"events":slice(events,0,count)}
+}
+
+
+func model_resource(value) {
+    if type(value) != "string" { return "" }
+    model := trim(value)
+    if starts_with(model,"models/") { model = substring(model,7,len(model)) }
+    if !regex_match(model,"^[A-Za-z0-9][A-Za-z0-9._-]*$") { return "" }
+    return "models/" + model
+}
+
+func create_client_impl(config) {
+    base := endpoint(get(config,"base_url",CHAT_BASE))
+    key := get(config,"api_key",null)
+    if key == null {
+        key = env("GEMINI_API_KEY")
+        if key == "" { key = env("GOOGLE_API_KEY") }
+    }
+    if type(key) != "string" { key = "" }
+    problem := ""
+    if base == "" { problem = "Gemini base URL must be a valid HTTPS URL." }
+    return {"base_url":base,"api_key":key,"timeout":get(config,"timeout",60.0),"transport":get(config,"transport",null),"validation_error":problem}
+}
+
+func message_for(data) {
+    problem := get(data,"error",null)
+    message := get(problem,"message",problem)
+    if type(message) == "string" && message != "" { return message }
+    return "Gemini request failed."
+}
+
+func decode_reply(response, key, streaming) {
+    status := get(response,"_status",get(response,"status",0))
+    if type(status) != "int" || status < 100 || status > 599 {
+        return {"ok":false,"message":"Gemini returned an invalid HTTP status."}
+    }
+    body := get(response,"_body",get(response,"body",""))
+    headers := get(response,"_headers",{})
+    request_id := redact(get(headers,"x-request-id",""),key)
+    data := null
+    if type(body) == "string" && body != "" && (!streaming || status < 200 || status > 299 || starts_with(trim(body),"{")) {
+        try { data = redact_value(parse_json(body),key) } except error { data = null }
+    }
+    if status < 200 || status > 299 || (type(data) == "dict" && has_key(data,"error")) {
+        return {"ok":false,"status_code":status,"message":message_for(data),"error_body":redact_wire(body,key)}
+    }
+    if streaming {
+        if type(data) == "dict" {
+            return {"ok":true,"status_code":status,"data":data,"events":[data],"request_id":request_id}
+        }
+        parsed := parse_stream_impl(get(response,"_stream_chunks",get(response,"stream_chunks",[])),body)
+        if !parsed["ok"] || len(parsed["events"]) == 0 {
+            return {"ok":false,"status_code":status,"message":"Gemini returned a malformed or empty event stream."}
+        }
+        events := redact_value(parsed["events"],key)
+        for event in events {
+            if has_key(event,"error") {
+                return {"ok":false,"status_code":status,"message":message_for(event),"data":event}
+            }
+        }
+        return {"ok":true,"status_code":status,"data":events,"events":events,"request_id":request_id}
+    }
+    if type(data) != "dict" { return {"ok":false,"status_code":status,"message":"Malformed Gemini JSON response."} }
+    return {"ok":true,"status_code":status,"data":data,"request_id":request_id}
+}
+
+func call(client, method, path, payload, streaming) {
+    base := endpoint(get(client,"base_url",""))
+    if base == "" { return {"ok":false,"message":"Gemini base URL must be a valid HTTPS URL."} }
+    key := get(client,"api_key","")
+    if type(key) != "string" || key == "" || regex_match(key,"[\\x00-\\x20\\x7f]") {
+        return {"ok":false,"message":"Gemini API key is required and must be a valid header value."}
+    }
+    timeout := get(client,"timeout",60.0)
+    if (type(timeout) != "int" && type(timeout) != "float") || timeout <= 0 || timeout - timeout != 0 {
+        return {"ok":false,"message":"Gemini timeout must be a positive finite number."}
+    }
+    headers := {"x-goog-api-key":key}
+    if method == "POST" { headers["Content-Type"] := "application/json" }
+    if streaming { headers["Accept"] := "text/event-stream" }
+    options := {"method":method,"timeout":timeout,"redirects":"none","_headers":headers}
+    if type(payload) == "dict" { options["_body"] := to_json(payload) }
+    if streaming { options["stream"] := true }
+    transport := get(client,"transport",null)
+    if type(transport) != "function" { transport = http_request }
+    reply := transport(base+path,options)
+    match reply {
+        case Err(error): { return {"ok":false,"message":redact(to_string(error),key)} }
+        case Ok(response): { return decode_reply(response,key,streaming) }
+        case other: { return {"ok":false,"message":"Gemini transport must return a Result."} }
+    }
+}
+
+func model_call(client, model, operation, body, streaming) {
+    resource := model_resource(model)
+    if resource == "" { return {"ok":false,"message":"Gemini model ID is invalid."} }
+    return call(client,"POST","/" + resource + ":" + operation,body,streaming)
+}
+
+func generation_body(contents, config) {
+    body := {"contents":contents}
+    if type(config) == "dict" {
+        for name in ["systemInstruction","generationConfig","safetySettings","tools","toolConfig","cachedContent","serviceTier","store"] {
+            if has_key(config,name) { body[name] := config[name] }
+        }
+    }
+    return body
+}
+
+func generate(client, model, contents, config, streaming) {
+    if type(contents) != "array" { return {"ok":false,"message":"Gemini contents must be an array."} }
+    operation := "generateContent"
+    if streaming { operation = "streamGenerateContent?alt=sse" }
+    return model_call(client,model,operation,generation_body(contents,config),streaming)
+}
+
+export create_client := create_client_impl
+export client_generate_content := func(client,model,contents,config) { return generate(client,model,contents,config,false) }
+export client_stream_generate_content := func(client,model,contents,config) { return generate(client,model,contents,config,true) }
+export generate_content := func(model,contents,config) { return generate(create_client_impl({}),model,contents,config,false) }
+export stream_generate_content := func(model,contents,config) { return generate(create_client_impl({}),model,contents,config,true) }
+export list_models := func() { return call(create_client_impl({}),"GET","/models",null,false) }
+export count_tokens := func(model,contents) { return model_call(create_client_impl({}),model,"countTokens",{"contents":contents},false) }
+export embed_content := func(model,content) { return model_call(create_client_impl({}),model,"embedContent",{"content":content},false) }
+export parse_stream := parse_stream_impl
+export gemini_endpoint := endpoint
+export gemini_model_resource := model_resource
+export GEMINI_API_BASE := CHAT_BASE

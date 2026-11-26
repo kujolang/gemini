@@ -30,11 +30,11 @@ Client configuration, `generateContent`, `streamGenerateContent` SSE parsing, `c
 
 ## Kujo Requirement
 
-Kujo >= 1.0.2.
+Current main requires Kujo 1.6.0 or newer.
 
 ## AI SDK Dependency
 
-`github:kujolang/ai-sdk@v1.1.0`.
+Current main pins `github:kujolang/ai-sdk@f3126dded28102f40d0ddecd50a559105c66f905`.
 
 ## Authentication
 

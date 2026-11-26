@@ -1,11 +1,444 @@
-func get(o,k,f) { if type(o)=="dict" && has_key(o,k) { return o[k] }; return f }
-func provider_impl(config) { if type(config)!="dict" { config:={} }; return {"name":"gemini","base_url":get(config,"base_url","https://generativelanguage.googleapis.com/v1beta"),"default_model":get(config,"model",""),"api_key_env":"GEMINI_API_KEY","capabilities":{"streaming":true,"tool_calls":true,"structured_output":true,"vision":true,"embeddings":true},"driver":driver()} }
-func describe(p) { return {"id":"gemini-native","protocol":"gemini-generate-content","auth":{"mode":"x-goog-api-key","allow_anonymous":false},"capabilities":p["capabilities"]} }
-func validate(p) { if type(p)!="dict" || get(p,"base_url","")=="" { return {"ok":false,"errors":[{"field":"base_url","message":"Gemini provider requires a base URL."}] } }; return {"ok":true,"errors":[]} }
-func encode_chat(ctx) { o:=ctx["resolved_options"]; contents:=[]; for m in ctx["messages"] { contents=push(contents,{"role":get(m,"role","user"),"parts":[{"text":get(m,"content","")}]}) }; body:={"contents":contents}; if has_key(o,"system_instruction") { body["systemInstruction"]:={"parts":[{"text":o["system_instruction"]}]} }; gen:={}; for k in ["temperature","top_p","top_k","max_output_tokens","stop_sequences","response_mime_type","response_schema"] { if has_key(o,k) { gen[k]:=o[k] } }; if len(gen)>0 { body["generationConfig"]:=gen }; if has_key(o,"tools") { body["tools"]:=o["tools"] }; return {"url":ctx["provider"]["base_url"]+"/models/"+get(o,"model",get(ctx["provider"],"default_model",""))+":generateContent","method":"POST","headers":{"x-goog-api-key":ctx["credential"],"Content-Type":"application/json"},"protected_headers":["x-goog-api-key","Content-Type"],"body":to_json(body),"stream_mode":get(o,"stream",false)} }
-func decode_chat(ctx) { d:=ctx["data"]; candidates:=get(d,"candidates",[]); c:={}; if len(candidates)>0 { c:=candidates[0] }; content:=get(c,"content",{}); text:=""; tools:=[]; for part in get(content,"parts",[]) { if has_key(part,"text") { text:=text+part["text"] }; if has_key(part,"functionCall") { fc:=part["functionCall"]; tools=push(tools,{"type":"function","function":{"name":get(fc,"name",""),"arguments":to_json(get(fc,"args",{}))}}) } }; u:=get(d,"usageMetadata",{}); input:=get(u,"promptTokenCount",0); output:=get(u,"candidatesTokenCount",0); reason:=get(c,"finishReason",""); if reason=="STOP" { reason:="stop" }; if reason=="MAX_TOKENS" { reason:="length" }; if len(tools)>0 { reason:="tool_calls" }; return {"ok":true,"request_id":get(ctx,"request_id",""),"model":get(ctx,"fallback_model",""),"output_text":text,"finish_reason":reason,"tool_calls":tools,"usage":{"input_tokens":input,"output_tokens":output,"total_tokens":input+output},"raw_provider":d} }
-func decode_error(ctx) { d:=ctx["data"]; if type(d)!="dict" || !has_key(d,"error") { return {"ok":false,"matched":false} }; e:=d["error"]; return {"ok":false,"matched":true,"category":get(e,"status","provider"),"message":get(e,"message","Gemini request failed"),"provider_code":get(e,"code",0),"raw_provider":d} }
-func decode_stream(ctx) { p:=parse_stream(get(ctx,"chunks",[]),get(ctx,"body_text","")); if !p["ok"] { return p }; text:=""; last:={}; for d in p["events"] { last:=d; for c in get(d,"candidates",[]) { for part in get(get(c,"content",{}),"parts",[]) { text:=text+get(part,"text","") } } }; return {"ok":true,"output_text":text,"finish_reason":"stop","usage":{"input_tokens":0,"output_tokens":0,"total_tokens":0},"raw_provider":{"stream_events":p["events"]}} }
-func driver() { return {"contract":"ai-sdk-provider-driver","version":"1.0.0","id":"gemini-native","describe":describe,"validate":validate,"encode_chat":encode_chat,"decode_chat":decode_chat,"decode_error":decode_error,"decode_stream":decode_stream} }
-export gemini_provider:=provider_impl
-export gemini_driver:=driver
+from src.gemini import gemini_endpoint, gemini_model_resource, GEMINI_API_BASE, parse_stream
+
+func get(value,key,fallback) {
+    if type(value) == "dict" && has_key(value,key) { return value[key] }
+    return fallback
+}
+
+func provider_impl(config) {
+    return {
+        "name":"gemini",
+        "base_url":gemini_endpoint(get(config,"base_url",GEMINI_API_BASE)),
+        "default_model":get(config,"model",""),
+        "api_key_env":"GEMINI_API_KEY",
+        "package_provider":true,
+        "static_stream_query":"alt=sse",
+        "capabilities":{"streaming":true,"tool_calls":true,"structured_output":true,"json_mode":true,"vision":true,"embeddings":true},
+        "driver":driver(),
+    }
+}
+
+func describe(provider) {
+    return {"id":"gemini-native","protocol":"gemini-generate-content","auth":{"mode":"x-goog-api-key","allow_anonymous":false},"capabilities":provider["capabilities"]}
+}
+
+func validate(provider, endpoint) {
+    if endpoint(get(provider,"base_url","")) == "" {
+        return {"ok":false,"errors":[{"field":"base_url","message":"Gemini base URL must be a valid HTTPS URL."}]}
+    }
+    return {"ok":true,"errors":[]}
+}
+
+func descriptor(context, resource, operation, body, streaming) {
+    provider := get(context,"provider",{})
+    base := get(provider,"base_url","")
+    if base == "" || resource == "" { return null }
+    key := get(context,"credential","")
+    if type(key) != "string" || key == "" || regex_match(key,"[\\x00-\\x20\\x7f]") { return null }
+    return {"url":base+"/"+resource+":"+operation,"method":"POST","headers":{"x-goog-api-key":key,"Content-Type":"application/json"},"protected_headers":["x-goog-api-key","Content-Type"],"body":to_json(body),"stream_mode":streaming}
+}
+
+func media_part(part) {
+    image := get(part,"image_url",get(part,"url",null))
+    url := get(image,"url",image)
+    if type(url) != "string" { return null }
+    if starts_with(url,"data:") {
+        fields := split(url,",")
+        if len(fields) != 2 || !regex_match(fields[0],"^data:image/[a-zA-Z0-9.+-]+;base64$") || fields[1] == "" { return null }
+        mime := substring(fields[0],5,len(fields[0])-7)
+        return {"inlineData":{"mimeType":mime,"data":fields[1]}}
+    }
+    if !starts_with(url,"https://") { return null }
+    file := {"fileUri":url}
+    mime := get(part,"mime_type",get(image,"mime_type",""))
+    if type(mime) == "string" && mime != "" { file["mimeType"] := mime }
+    return {"fileData":file}
+}
+
+func message_parts(message) {
+    parts := get(message,"parts",null)
+    if type(parts) == "array" { return parts }
+    content := get(message,"content",null)
+    if type(content) == "string" { return [{"text":content}] }
+    if type(content) == "null" { return [] }
+    if type(content) != "array" { return null }
+    result := []
+    for item in content {
+        normalized := null
+        if type(item) == "string" { normalized = {"text":item} }
+        if type(item) == "dict" {
+            kind := get(item,"type","")
+            if kind == "image_url" || kind == "input_image" { normalized = media_part(item) }
+            else if kind == "text" || kind == "input_text" {
+                if type(get(item,"text",null)) == "string" { normalized = {"text":item["text"]} }
+            } else if kind == "" { normalized = item }
+        }
+        if type(normalized) == "null" { return null }
+        result = push(result,normalized)
+    }
+    return result
+}
+
+func tool_call_part(item) {
+    tool := get(item,"function",{})
+    name := get(tool,"name","")
+    if type(name) != "string" || name == "" { return null }
+    arguments := get(tool,"arguments",{})
+    if type(arguments) == "string" {
+        try { arguments = parse_json(arguments) } except error { return null }
+    }
+    if type(arguments) != "dict" { return null }
+    call := {"name":name,"args":arguments}
+    id := get(item,"id","")
+    if type(id) == "string" && id != "" { call["id"] := id }
+    part := {"functionCall":call}
+    if has_key(item,"thoughtSignature") { part["thoughtSignature"] := item["thoughtSignature"] }
+    return part
+}
+
+func tool_reply(message, names) {
+    id := get(message,"tool_call_id","")
+    if type(id) != "string" { id = "" }
+    name := get(message,"name",get(names,id,""))
+    if type(name) != "string" || name == "" { return null }
+    output := get(message,"content","")
+    if type(output) == "string" {
+        try { output = parse_json(output) } except error { output = message["content"] }
+    }
+    if type(output) != "dict" { output = {"output":output} }
+    body := {"name":name,"response":output}
+    if type(id) == "string" && id != "" { body["id"] := id }
+    return {"functionResponse":body}
+}
+
+func build_contents(messages) {
+    if type(messages) != "array" { return null }
+    contents := []
+    instructions := []
+    names := {}
+    previous_role := ""
+    for message in messages {
+        role := get(message,"role","user")
+        parts := message_parts(message)
+        if role == "tool" && type(get(message,"parts",null)) != "array" {
+            reply := tool_reply(message,names)
+            if type(reply) == "null" { return null }
+            parts = [reply]
+        }
+        if type(parts) != "array" { return null }
+        if role == "system" || role == "developer" {
+            instructions = concat(instructions,parts)
+            continue
+        }
+        if role == "assistant" || role == "model" {
+            for item in get(message,"tool_calls",[]) {
+                call := tool_call_part(item)
+                if type(call) == "null" { return null }
+                parts = push(parts,call)
+            }
+            for part in parts {
+                call := get(part,"functionCall",null)
+                id := get(call,"id","")
+                if type(id) == "string" && id != "" { names[id] := get(call,"name","") }
+            }
+            if len(parts) > 1 && parts[0] == {"text":""} { parts = slice(parts,1,len(parts)) }
+            contents = push(contents,{"role":"model","parts":parts})
+        } else if role == "user" || role == "tool" {
+            if role == "tool" && previous_role == "tool" {
+                index := len(contents)-1
+                merged := contents[index]
+                merged["parts"] = concat(merged["parts"],parts)
+                contents[index] = merged
+            } else { contents = push(contents,{"role":"user","parts":parts}) }
+        } else { return null }
+        previous_role = role
+    }
+    return {"contents":contents,"instructions":instructions}
+}
+
+func with_system(body, messages, options, resolved) {
+    explicit := get(options,"systemInstruction",get(options,"system_instruction",get(resolved,"system_instruction",null)))
+    parts := messages["instructions"]
+    if type(explicit) == "string" { parts = concat([{"text":explicit}],parts) }
+    if type(explicit) == "dict" {
+        explicit_parts := get(explicit,"parts",[])
+        if type(explicit_parts) == "array" { parts = concat(explicit_parts,parts) }
+    }
+    if len(parts) > 0 { body["systemInstruction"] := {"parts":parts} }
+    return body
+}
+
+func generation_config(options, resolved) {
+    generation := get(options,"generationConfig",{})
+    if type(generation) != "dict" { generation = {} }
+    for pair in [["temperature","temperature"],["top_p","topP"],["top_k","topK"],["max_output_tokens","maxOutputTokens"],["max_tokens","maxOutputTokens"],["stop_sequences","stopSequences"],["response_mime_type","responseMimeType"],["response_schema","responseSchema"],["thinking_config","thinkingConfig"]] {
+        if has_key(generation,pair[1]) == 0 {
+            value := get(options,pair[0],get(resolved,pair[0],null))
+            if type(value) != "null" { generation[pair[1]] := value }
+        }
+    }
+    stop := get(options,"stop",null)
+    if has_key(generation,"stopSequences") == 0 && type(stop) == "array" { generation["stopSequences"] := stop }
+    format := get(options,"response_format",get(resolved,"response_format",{}))
+    format_type := get(format,"type","")
+    schema := get(resolved,"structured_output_schema",get(options,"structured_output_schema",null))
+    if type(schema) == "null" && format_type == "json_schema" { schema = get(get(format,"json_schema",{}),"schema",null) }
+    if format_type == "json_object" || format_type == "json_schema" || type(schema) == "dict" {
+        if has_key(generation,"responseMimeType") == 0 { generation["responseMimeType"] := "application/json" }
+        if type(schema) == "dict" && has_key(generation,"responseSchema") == 0 && has_key(generation,"responseJsonSchema") == 0 {
+            generation["responseJsonSchema"] := schema
+        }
+    }
+    return generation
+}
+
+func normalize_tools(value) {
+    if type(value) != "array" { return [] }
+    tools := []
+    functions := []
+    for tool in value {
+        if get(tool,"type","") == "function" {
+            definition := get(tool,"function",null)
+            if type(definition) != "dict" { return null }
+            declaration := {"name":get(definition,"name","")}
+            for field in ["description","parameters","parametersJsonSchema"] {
+                if has_key(definition,field) { declaration[field] := definition[field] }
+            }
+            functions = push(functions,declaration)
+        } else if type(tool) == "dict" { tools = push(tools,tool) }
+        else { return null }
+    }
+    if len(functions) > 0 { tools = push(tools,{"functionDeclarations":functions}) }
+    return tools
+}
+
+func tool_config(options, resolved) {
+    direct := get(options,"toolConfig",null)
+    if type(direct) == "dict" { return direct }
+    choice := get(options,"tool_choice",get(resolved,"tool_choice",null))
+    modes := {"auto":"AUTO","none":"NONE","required":"ANY"}
+    if type(choice) == "string" && has_key(modes,choice) {
+        return {"functionCallingConfig":{"mode":modes[choice]}}
+    }
+    name := get(get(choice,"function",{}),"name","")
+    if type(name) == "string" && name != "" {
+        return {"functionCallingConfig":{"mode":"ANY","allowedFunctionNames":[name]}}
+    }
+    return null
+}
+
+func encode_chat(context, model_resource) {
+    provider := get(context,"provider",{})
+    resolved := get(context,"resolved_options",{})
+    options := get(context,"options",{})
+    messages := build_contents(get(context,"messages",[]))
+    if type(messages) == "null" { return null }
+    body := with_system({"contents":messages["contents"]},messages,options,resolved)
+    generation := generation_config(options,resolved)
+    if len(keys(generation)) > 0 { body["generationConfig"] := generation }
+    tools := normalize_tools(get(options,"tools",get(resolved,"tools",[])))
+    if type(tools) == "null" { return null }
+    if len(tools) > 0 { body["tools"] := tools }
+    configuration := tool_config(options,resolved)
+    if type(configuration) == "dict" { body["toolConfig"] := configuration }
+    for name in ["safetySettings","cachedContent","serviceTier","store"] {
+        if has_key(options,name) { body[name] := options[name] }
+    }
+    resource := model_resource(get(resolved,"model",get(provider,"default_model","")))
+    streaming := get(resolved,"stream",false) == true
+    operation := "generateContent"
+    if streaming { operation = "streamGenerateContent?alt=sse" }
+    return descriptor(context,resource,operation,body,streaming)
+}
+
+func encode_embeddings(context, model_resource) {
+    provider := get(context,"provider",{})
+    resolved := get(context,"resolved_options",{})
+    options := get(context,"options",{})
+    resource := model_resource(get(resolved,"model",get(provider,"default_model","")))
+    if resource == "" { return null }
+    input := get(context,"input",null)
+    template := {"model":resource}
+    dimensions := get(options,"outputDimensionality",get(options,"dimensions",null))
+    if type(dimensions) != "null" {
+        if type(dimensions) != "int" || dimensions < 1 { return null }
+        template["outputDimensionality"] := dimensions
+    }
+    for pair in [["task_type","taskType"],["title","title"],["auto_truncate","autoTruncate"]] {
+        value := get(options,pair[1],get(options,pair[0],null))
+        if type(value) != "null" { template[pair[1]] := value }
+    }
+    if type(input) == "string" {
+        template["content"] := {"parts":[{"text":input}]}
+        return descriptor(context,resource,"embedContent",template,false)
+    }
+    if type(input) != "array" || len(input) == 0 { return null }
+    requests := range(0,len(input))
+    for index in range(0,len(input)) {
+        text := input[index]
+        if type(text) != "string" { return null }
+        request := template
+        request["content"] := {"parts":[{"text":text}]}
+        requests[index] = request
+    }
+    return descriptor(context,resource,"batchEmbedContents",{"requests":requests},false)
+}
+
+func decode_embeddings(context) {
+    data := get(context,"data",null)
+    if type(data) != "dict" || has_key(data,"error") { return {"ok":false} }
+    rows := get(data,"embeddings",null)
+    if type(rows) == "null" && has_key(data,"embedding") { rows = [data["embedding"]] }
+    if type(rows) != "array" || len(rows) == 0 { return {"ok":false} }
+    embeddings := range(0,len(rows))
+    for index in range(0,len(rows)) {
+        vector := get(rows[index],"values",null)
+        if type(vector) != "array" || len(vector) == 0 { return {"ok":false} }
+        for value in vector {
+            if type(value) != "int" && type(value) != "float" { return {"ok":false} }
+        }
+        embeddings[index] = {"index":index,"vector":vector}
+    }
+    usage := get(data,"usageMetadata",{})
+    input_tokens := get(usage,"promptTokenCount",0)
+    if type(input_tokens) != "int" || input_tokens < 0 { input_tokens = 0 }
+    return {"ok":true,"model":get(data,"modelVersion",get(context,"fallback_model","")),"embeddings":embeddings,"usage":{"input_tokens":input_tokens,"total_tokens":input_tokens},"raw_provider":data}
+}
+
+func candidate_for(data) {
+    candidates := get(data,"candidates",[])
+    if type(candidates) != "array" { return {} }
+    for index in range(0,len(candidates)) {
+        item := candidates[index]
+        if type(item) == "dict" && get(item,"index",index) == 0 { return item }
+    }
+    return {}
+}
+
+func outcome(reason, blocked, calls) {
+    if blocked || has_key({"SAFETY":true,"RECITATION":true,"BLOCKLIST":true,"PROHIBITED_CONTENT":true,"SPII":true,"IMAGE_SAFETY":true},reason) { return "content_filter" }
+    if reason == "MAX_TOKENS" { return "length" }
+    if len(calls) > 0 { return "tool_calls" }
+    if reason == "STOP" || reason == "" { return "stop" }
+    return reason
+}
+
+func add_usage(usage, data) {
+    source := get(data,"usageMetadata",null)
+    if type(source) != "dict" { return usage }
+    for pair in [["promptTokenCount","input_tokens"],["candidatesTokenCount","output_tokens"],["totalTokenCount","total_tokens"],["cachedContentTokenCount","cached_input_tokens"],["thoughtsTokenCount","reasoning_tokens"],["toolUsePromptTokenCount","tool_input_tokens"]] {
+        amount := get(source,pair[0],null)
+        if type(amount) == "int" && amount >= 0 { usage[pair[1]] := amount }
+    }
+    return usage
+}
+
+func tool_result(part) {
+    call := get(part,"functionCall",null)
+    name := get(call,"name","")
+    if type(name) != "string" || name == "" { return null }
+    fields := get(call,"args",{})
+    if type(fields) != "dict" { return null }
+    tool := {"type":"function","function":{"name":name,"arguments":to_json(fields)}}
+    id := get(call,"id","")
+    if type(id) == "string" && id != "" { tool["id"] := id }
+    if has_key(part,"thoughtSignature") { tool["thoughtSignature"] := part["thoughtSignature"] }
+    return tool
+}
+
+func aggregate(context, events, raw, streaming) {
+    snippets := []
+    calls := []
+    seen_ids := {}
+    usage := {"input_tokens":0,"output_tokens":0}
+    request_id := get(context,"request_id","")
+    model := get(context,"fallback_model","")
+    reason := ""
+    blocked := false
+    recognized := false
+    for event in events {
+        if type(event) != "dict" || has_key(event,"error") { return {"ok":false} }
+        candidate := candidate_for(event)
+        if has_key(event,"candidates") || has_key(event,"promptFeedback") || has_key(event,"usageMetadata") { recognized = true }
+        usage = add_usage(usage,event)
+        event_id := get(event,"responseId","")
+        version := get(event,"modelVersion","")
+        if type(event_id) == "string" && event_id != "" { request_id = event_id }
+        if type(version) == "string" && version != "" { model = version }
+        block_reason := get(get(event,"promptFeedback",{}),"blockReason","")
+        if type(block_reason) == "string" && block_reason != "" && block_reason != "BLOCK_REASON_UNSPECIFIED" { blocked = true }
+        finish := get(candidate,"finishReason","")
+        if type(finish) == "string" && finish != "" { reason = finish }
+        parts := get(get(candidate,"content",{}),"parts",[])
+        if type(parts) != "array" { return {"ok":false} }
+        for part in parts {
+            if type(part) != "dict" { return {"ok":false} }
+            body := get(part,"text",null)
+            if type(body) == "string" && get(part,"thought",false) != true { snippets = push(snippets,body) }
+            if has_key(part,"functionCall") {
+                tool := tool_result(part)
+                if type(tool) == "null" { return {"ok":false} }
+                id := get(tool,"id","")
+                if id != "" && has_key(seen_ids,id) {
+                    calls[seen_ids[id]] = tool
+                } else {
+                    if id != "" { seen_ids[id] := len(calls) }
+                    calls = push(calls,tool)
+                }
+            }
+        }
+    }
+    if !recognized || (streaming && !blocked && (reason == "" || reason == "FINISH_REASON_UNSPECIFIED")) { return {"ok":false} }
+    if has_key(usage,"total_tokens") == 0 {
+        usage["total_tokens"] := usage["input_tokens"] + usage["output_tokens"] + get(usage,"reasoning_tokens",0) + get(usage,"tool_input_tokens",0)
+    }
+    return {"ok":true,"request_id":request_id,"model":model,"output_text":join(snippets,""),"finish_reason":outcome(reason,blocked,calls),"tool_calls":calls,"usage":usage,"raw_provider":raw}
+}
+
+func decode_chat(context, summarize) {
+    data := get(context,"data",null)
+    if type(data) != "dict" { return {"ok":false} }
+    return summarize(context,[data],data,false)
+}
+
+func decode_stream(context, parser, summarize) {
+    parsed := parser(get(context,"chunks",[]),get(context,"body_text",""))
+    if !parsed["ok"] || len(parsed["events"]) == 0 { return {"ok":false} }
+    return summarize(context,parsed["events"],{"stream_events":parsed["events"]},true)
+}
+
+func decode_error(context) {
+    data := get(context,"data",null)
+    if type(data) != "dict" || has_key(data,"error") == 0 { return {"ok":false,"matched":false} }
+    problem := data["error"]
+    message := get(problem,"message",problem)
+    if type(message) != "string" || message == "" { message = "Gemini request failed." }
+    status := get(problem,"status","")
+    category := "provider"
+    if status == "UNAUTHENTICATED" || status == "PERMISSION_DENIED" { category = "auth" }
+    return {"ok":false,"matched":true,"category":category,"message":message,"provider_code":get(problem,"code",status),"raw_provider":data}
+}
+
+func driver() {
+    endpoint := gemini_endpoint
+    resource := gemini_model_resource
+    parser := parse_stream
+    summarize := aggregate
+    validate_provider := validate
+    chat_encoder := encode_chat
+    embeddings_encoder := encode_embeddings
+    chat_decoder := decode_chat
+    stream_decoder := decode_stream
+    return {
+        "contract":"ai-sdk-provider-driver","version":"1.0.0","id":"gemini-native",
+        "describe":describe,"validate":func(provider) { return validate_provider(provider,endpoint) },
+        "encode_chat":func(context) { return chat_encoder(context,resource) },
+        "encode_embeddings":func(context) { return embeddings_encoder(context,resource) },
+        "decode_chat":func(context) { return chat_decoder(context,summarize) },
+        "decode_embeddings":decode_embeddings,"decode_error":decode_error,
+        "decode_stream":func(context) { return stream_decoder(context,parser,summarize) },
+    }
+}
+
+export gemini_provider := provider_impl
+export gemini_driver := driver

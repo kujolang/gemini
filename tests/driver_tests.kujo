@@ -1,3 +1,103 @@
-test_setup { from src.provider import gemini_provider, gemini_driver }
+test_setup { from src.provider import gemini_provider, gemini_driver; from src.ai_sdk import create_client, chat_completion_stream, embeddings }
 test "driver contract and native request mapping" { p:=gemini_provider({"model":"gemini-test"}); d:=gemini_driver(); assert_equal(d["version"],"1.0.0"); e:=d["encode_chat"]({"provider":p,"credential":"secret","messages":[{"role":"user","content":"hi"}],"resolved_options":{"model":"gemini-test","stream":false}}); assert_equal(contains(e["url"],"generateContent"),1); assert_equal(e["headers"]["x-goog-api-key"],"secret") }
 test "driver decodes candidates usage and finish" { d:=gemini_driver(); r:=d["decode_chat"]({"fallback_model":"m","data":{"candidates":[{"content":{"parts":[{"text":"ok"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":4,"candidatesTokenCount":2}}}); assert_equal(r["output_text"],"ok"); assert_equal(r["finish_reason"],"stop"); assert_equal(r["usage"]["total_tokens"],6) }
+
+test "chat descriptor maps system, media, tool continuations, and schema controls" {
+    provider := gemini_provider({"model":"models/gemini-test","base_url":"https://api.example/v1beta/"})
+    driver := gemini_driver()
+    assert_false(driver["validate"](gemini_provider({"base_url":"http://api.example"}))["ok"])
+    messages := [
+        {"role":"system","content":"Answer briefly"},
+        {"role":"user","content":[{"type":"text","text":"Look"},{"type":"image_url","image_url":{"url":"data:image/png;base64,YQ=="}}]},
+        {"role":"assistant","content":"","tool_calls":[{"id":"call-1","type":"function","thoughtSignature":"opaque-fixture","function":{"name":"lookup","arguments":"{\"q\":\"weather\"}"}}]},
+        {"role":"tool","tool_call_id":"call-1","content":"{\"result\":\"clear\"}"}
+    ]
+    options := {
+        "max_output_tokens":128,"top_p":0.9,
+        "response_format":{"type":"json_schema","json_schema":{"schema":{"type":"object"}}},
+        "tools":[{"type":"function","function":{"name":"lookup","parameters":{"type":"object"}}}],
+        "tool_choice":{"type":"function","function":{"name":"lookup"}}
+    }
+    encoded := driver["encode_chat"]({"provider":provider,"credential":"fixture-key","messages":messages,"resolved_options":{"stream":true,"max_tokens":400},"options":options})
+    assert_equal(encoded["url"],"https://api.example/v1beta/models/gemini-test:streamGenerateContent?alt=sse")
+    body := parse_json(encoded["body"])
+    assert_equal(body["systemInstruction"]["parts"][0]["text"],"Answer briefly")
+    assert_equal(body["contents"][0]["parts"][1]["inlineData"]["mimeType"],"image/png")
+    assert_equal(body["contents"][1]["role"],"model")
+    assert_equal(body["contents"][1]["parts"][0]["thoughtSignature"],"opaque-fixture")
+    assert_equal(body["contents"][1]["parts"][0]["functionCall"]["args"]["q"],"weather")
+    assert_equal(body["contents"][2]["parts"][0]["functionResponse"]["name"],"lookup")
+    assert_equal(body["contents"][2]["parts"][0]["functionResponse"]["response"]["result"],"clear")
+    assert_equal(body["generationConfig"]["maxOutputTokens"],128)
+    assert_equal(body["generationConfig"]["topP"],0.9)
+    assert_equal(body["generationConfig"]["responseJsonSchema"]["type"],"object")
+    assert_equal(body["tools"][0]["functionDeclarations"][0]["name"],"lookup")
+    assert_equal(body["toolConfig"]["functionCallingConfig"]["allowedFunctionNames"],["lookup"])
+}
+
+test "package SDK streaming enforces transport policy and preserves finish usage and tool metadata" {
+    provider := gemini_provider({"model":"gemini-test"})
+    client := create_client(provider,"fixture-key")
+    transport := func(url, options) {
+        assert_equal(url,"https://generativelanguage.googleapis.com/v1beta/models/gemini-test:streamGenerateContent?alt=sse")
+        assert_equal(options["redirects"],"none")
+        assert_equal(options["_headers"]["x-goog-api-key"],"fixture-key")
+        assert_equal(has_key(options["_headers"],"Host"),0)
+        return Ok({"_status":200,"_stream_chunks":[
+            "data: {\"responseId\":\"reply-1\",\"modelVersion\":\"gemini-test-001\",\"candidates\":[{\"index\":1,\"content\":{\"parts\":[{\"text\":\"discard\"}]}},{\"index\":0,\"content\":{\"parts\":[{\"text\":\"private thought\",\"thought\":true},{\"text\":\"hello\"}]}}]}\r\n\r\n",
+            "data: {\"candidates\":[{\"index\":0,\"content\":{\"parts\":[{\"functionCall\":{\"id\":\"call-1\",\"name\":\"lookup\",\"args\":{\"q\":\"weather\"}},\"thoughtSignature\":\"opaque-fixture\"}]},\"finishReason\":\"STOP\",\"safetyRatings\":[{\"category\":\"HARM_CATEGORY_HARASSMENT\",\"probability\":\"NEGLIGIBLE\"}]}],\"usageMetadata\":{\"promptTokenCount\":4,\"candidatesTokenCount\":2,\"cachedContentTokenCount\":1,\"thoughtsTokenCount\":3,\"totalTokenCount\":9}}\r\n\r\n"
+        ]})
+    }
+    options := {"transport":transport,"max_retries":0,"redirects":"follow","allow_unsafe_header_override":true,"headers":{"Host":"unused.example","x-goog-api-key":"unused-fixture"}}
+    messages := [{"role":"user","content":"hello"}]
+    response := chat_completion_stream(client,messages,options,func(event) { return null })
+    assert_true(response["ok"])
+    assert_equal(response["request_id"],"reply-1")
+    assert_equal(response["model"],"gemini-test-001")
+    assert_equal(response["output_text"],"hello")
+    assert_equal(response["finish_reason"],"tool_calls")
+    assert_equal(response["tool_calls"][0]["thoughtSignature"],"opaque-fixture")
+    assert_equal(response["usage"]["reasoning_tokens"],3)
+    assert_equal(response["usage"]["cached_input_tokens"],1)
+    assert_equal(response["usage"]["total_tokens"],9)
+    assert_equal(len(response["raw"]["stream_events"]),2)
+    assert_equal(response["raw"]["stream_events"][1]["candidates"][0]["safetyRatings"][0]["probability"],"NEGLIGIBLE")
+}
+
+test "embeddings use native single and batch protocols through SDK" {
+    provider := gemini_provider({"model":"models/fixture-embedding"})
+    client := create_client(provider,"fixture-key")
+    transport := func(url, options) {
+        assert_equal(options["redirects"],"none")
+        assert_equal(options["_headers"]["x-goog-api-key"],"fixture-key")
+        body := parse_json(options["_body"])
+        if ends_with(url,":embedContent") {
+            assert_equal(body["content"]["parts"][0]["text"],"single")
+            assert_equal(body["outputDimensionality"],2)
+            return Ok({"_status":200,"_body":"{\"embedding\":{\"values\":[0.1,0.2]},\"usageMetadata\":{\"promptTokenCount\":3}}"})
+        }
+        assert_equal(url,"https://generativelanguage.googleapis.com/v1beta/models/fixture-embedding:batchEmbedContents")
+        assert_equal(body["requests"][0]["model"],"models/fixture-embedding")
+        assert_equal(body["requests"][0]["content"]["parts"][0]["text"],"first")
+        assert_equal(body["requests"][1]["content"]["parts"][0]["text"],"second")
+        assert_equal(body["requests"][1]["taskType"],"RETRIEVAL_DOCUMENT")
+        return Ok({"_status":200,"_body":"{\"embeddings\":[{\"values\":[0.4,0.5]},{\"values\":[0.6,0.7]}]}"})
+    }
+    first := embeddings(client,"single",{"transport":transport,"max_retries":0,"dimensions":2})
+    assert_true(first["ok"])
+    assert_equal(first["usage"]["input_tokens"],3)
+    assert_equal(first["embeddings"][0]["vector"],[0.1,0.2])
+    batch := embeddings(client,["first","second"],{"transport":transport,"max_retries":0,"task_type":"RETRIEVAL_DOCUMENT"})
+    assert_true(batch["ok"])
+    assert_equal(batch["embeddings"][1]["index"],1)
+    assert_equal(batch["embeddings"][1]["vector"],[0.6,0.7])
+}
+
+test "driver exposes safety blocks and rejects unfinished completions" {
+    driver := gemini_driver()
+    blocked := driver["decode_chat"]({"fallback_model":"fixture","data":{"promptFeedback":{"blockReason":"SAFETY"},"usageMetadata":{"promptTokenCount":2}}})
+    assert_equal(blocked["finish_reason"],"content_filter")
+    assert_equal(blocked["raw_provider"]["promptFeedback"]["blockReason"],"SAFETY")
+    assert_false(driver["decode_stream"]({"body_text":"data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"unfinished\"}]}}]}\n\n"})["ok"])
+    assert_false(driver["decode_embeddings"]({"data":{"embedding":{"values":["invalid"]}}})["ok"])
+}

@@ -1,12 +1,14 @@
 # Kujo Gemini Provider
 
-[![Version](https://img.shields.io/badge/version-0.1.3-black)](https://github.com/kujolang/gemini/releases/tag/v0.1.3)
+[![Version](https://img.shields.io/badge/version-0.1.3-black)](https://github.com/kujolang/gemini/tree/v0.1.3)
 [![License](https://img.shields.io/badge/license-MIT-lightgrey)](LICENSE)
 [![built with Kujo](https://img.shields.io/badge/built%20with-Kujo-white.svg)](https://github.com/kujolang/kujo)
 
 Native Google Gemini Developer API support for Kujo, with normalized AI SDK integration.
 
 ## Install
+
+The current branch requires Kujo 1.6.0 or newer.
 
 ```bash
 kujo run /path/to/kennel/kennel.kujo \
@@ -31,7 +33,7 @@ messages := [
 
 result := client_generate_content(
     client,
-    "gemini-2.5-flash",
+    "gemini-3.5-flash-lite",
     messages,
     {}
 )
@@ -41,15 +43,23 @@ print(result["data"]["candidates"][0]["content"]["parts"][0]["text"])
 
 ## Native API
 
-The native client preserves Gemini contents, parts, candidates, safety metadata, streaming events, tools, structured output, multimodal input, and usage. Use it when you need Gemini-specific request and response fidelity.
+The native client preserves Gemini contents, parts, candidates, safety metadata,
+streaming events, tools, structured output, multimodal input, and usage.
+`client_stream_generate_content` returns parsed SSE frames in `result["events"]`.
+Pass a bare model ID or its `models/` resource name.
 
 ## AI SDK integration
 
-`gemini_provider({"model": "gemini-2.5-flash"})` provides normalized chat, streaming, tools, structured output, vision, and embeddings semantics where supported by the selected model. AI SDK core retains transport, retries, redaction, and final normalization responsibilities.
+`gemini_provider({"model": "gemini-3.5-flash-lite"})` provides normalized chat, streaming, tools, structured output, vision, and embeddings semantics where supported by the selected model. The SDK maps system messages, Gemini parts, tools and transcripts to the native
+request. For thought-signature fidelity in multi-turn Gemini calls, keep the
+returned native parts or use the signature returned with a normalized tool call.
 
 ## Authentication and security
 
-Set `GEMINI_API_KEY`. Remote endpoints require HTTPS; embedded URL credentials and credential leakage are rejected. Tests never contain real secrets.
+Set `GEMINI_API_KEY`. The native client also checks `GOOGLE_API_KEY`. Both
+client paths use the `x-goog-api-key` header and disable redirects. The SDK
+stream decoder preserves native candidate metadata and requires a terminal
+candidate or a prompt block before returning normalized success.
 
 ## Testing and documentation
 

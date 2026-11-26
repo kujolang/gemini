@@ -1,4 +1,45 @@
-test_setup { from src.gemini import create_client, client_generate_content, parse_stream }
+test_setup { from src.gemini import create_client, client_generate_content, client_stream_generate_content, parse_stream }
 test "client validates HTTPS and uses protected API key header" { c:=create_client({"base_url":"https://generativelanguage.googleapis.com/v1beta","api_key":"secret","transport":func(url,o) { assert_equal(o["_headers"]["x-goog-api-key"],"secret"); return Ok({"_status":200,"_body":"{\"ok\":true}"}) }}); assert_true(client_generate_content(c,"gemini-test",[],{})["ok"]); assert_true(create_client({"base_url":"http://remote.example"})["validation_error"]!="") }
 test "SSE stream parser handles additive events and malformed data" { p:=parse_stream(["data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"A\"}]}}]}\n\n","event: done\ndata: {\"x\":1}\n\n"],""); assert_true(p["ok"]); assert_equal(len(p["events"]),2); assert_false(parse_stream(["data: bad\n\n"],"")["ok"]) }
 test "native errors redact credentials" { c:=create_client({"api_key":"secret","transport":func(url,o) { return Ok({"_status":401,"_body":"{\"error\":{\"message\":\"secret denied\"}}"}) }}); r:=client_generate_content(c,"m",[],{}); assert_false(r["ok"]); assert_equal(contains(r["message"],"secret"),0) }
+
+test "native streaming uses Gemini SSE and keeps all candidates" {
+    client := create_client({"api_key":"fixture-key","base_url":"https://api.example/v1beta/","timeout":7,"transport":func(url, options) {
+        assert_equal(url,"https://api.example/v1beta/models/gemini-test:streamGenerateContent?alt=sse")
+        assert_equal(options["redirects"],"none")
+        assert_equal(options["timeout"],7)
+        assert_equal(options["stream"],true)
+        assert_equal(options["_headers"]["Accept"],"text/event-stream")
+        body := parse_json(options["_body"])
+        assert_equal(has_key(body,"stream"),0)
+        assert_equal(body["cachedContent"],"cachedContents/fixture")
+        assert_equal(body["contents"][0]["parts"][0]["text"],"hello")
+        return Ok({"_status":200,"_stream_chunks":[
+            ": heartbeat\r\ndata: {\"candidates\":[{\"index\":0,\"content\":{\"parts\":[",
+            "{\"text\":\"first\"}]},\"finishReason\":\"STOP\"},{\"index\":1,\"content\":{\"parts\":[{\"text\":\"second\"}]},\"finishReason\":\"STOP\"}]}\r\n\r\n",
+            "data: {\"usageMetadata\":{\"totalTokenCount\":7}}\r\n\r\n"
+        ]})
+    }})
+    streamed := client_stream_generate_content(client,"models/gemini-test",[{"role":"user","parts":[{"text":"hello"}]}],{"cachedContent":"cachedContents/fixture"})
+    assert_true(streamed["ok"])
+    assert_equal(streamed["events"][0]["candidates"][1]["content"]["parts"][0]["text"],"second")
+    assert_equal(streamed["events"][1]["usageMetadata"]["totalTokenCount"],7)
+    assert_equal(len(parse_stream([],"data: {\"event\":1}\n\n")["events"]),1)
+}
+
+test "invalid native client data and typed diagnostics are contained" {
+    unused := func(url, options) { return Err("unexpected fixture call") }
+    client := create_client({"api_key":"fixture-key","transport":unused})
+    assert_equal(client_generate_content(client,null,[],{})["message"],"Gemini model ID is invalid.")
+    assert_equal(client_generate_content(client,"gemini-test",{}, {})["message"],"Gemini contents must be an array.")
+    client = create_client({"api_key":"fixture-key","timeout":0,"transport":unused})
+    assert_equal(client_generate_content(client,"gemini-test",[],{})["message"],"Gemini timeout must be a positive finite number.")
+    client = create_client({"api_key":"fixture:\"\\key","transport":func(url, options) {
+        key := options["_headers"]["x-goog-api-key"]
+        return Ok({"_status":400,"_body":to_json({"error":{"message":"denied " + key,"status":"INVALID_ARGUMENT"}})})
+    }})
+    broken := client_generate_content(client,"gemini-test",[],{})
+    assert_equal(broken["message"],"denied [REDACTED]")
+    assert_equal(parse_json(broken["error_body"])["error"]["message"],"denied [REDACTED]")
+    assert_equal(parse_json(broken["error_body"])["error"]["status"],"INVALID_ARGUMENT")
+}
