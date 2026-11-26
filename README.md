@@ -12,11 +12,13 @@ The current branch requires Kujo 1.6.0 or newer.
 
 ```bash
 kujo run /path/to/kennel/kennel.kujo \
-  -- add github:kujolang/gemini@v0.1.3 \
+  -- add github:kujolang/gemini@24d3c4e0e5c681e9c3b462867cd9966991d3fcee \
   --alias gemini
 kujo run /path/to/kennel/kennel.kujo -- install
 export GEMINI_API_KEY=your-key
 ```
+
+The `v0.1.3` tag packages the preceding driver.
 
 ## 30-second quick start
 
